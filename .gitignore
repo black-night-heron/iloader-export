@@ -1,0 +1,11 @@
+# Build artifacts
+/target
+
+# Exported secrets: never commit these
+*.p12
+*.der
+*.key
+*.pem
+
+# Local environment
+.env

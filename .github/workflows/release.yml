@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-aarch64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version
+        shell: bash
+        run: echo "VER=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/iloader-export" staging/
+          cp README.md LICENSE staging/
+          tar -C staging -czf "iloader-export-${VER}-${{ matrix.suffix }}.tar.gz" .
+
+      - name: Package
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/iloader-export.exe" staging
+          Copy-Item README.md, LICENSE staging
+          Compress-Archive -Path staging/* -DestinationPath "iloader-export-$env:VER-${{ matrix.suffix }}.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: iloader-export-${{ env.VER }}-${{ matrix.suffix }}
+          path: "iloader-export-*"
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: iloader-export-*
+          path: dist
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*/*
+          generate_release_notes: true

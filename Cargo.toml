@@ -1,0 +1,33 @@
+[package]
+name = "iloader-export"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Export the Apple Development certificate and private key that iLoader already uses, packaged as a PKCS#12 archive, without creating or revoking anything"
+license = "MIT"
+readme = "README.md"
+keywords = ["ios", "sideload", "p12", "iloader", "isideload"]
+categories = ["command-line-utilities"]
+
+# TODO before publishing: real author and repository URLs
+# authors = ["Your Name <you@example.com>"]
+# repository = "https://github.com/<you>/iloader-export"
+# homepage = "https://github.com/<you>/iloader-export"
+
+[dependencies]
+# fs-storage is the fallback iLoader uses when the credential store is unavailable; the other
+# defaults cannot be dropped, isideload 0.4.6 references idevice and serde/derive unconditionally.
+isideload = { version = "0.4.6", features = ["fs-storage"] }
+serde = { version = "1", features = ["derive"] }
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
+rsa = "0.9"
+x509-cert = "0.2"
+sha2 = "0.11"
+hex = "0.4"
+rootcause = "0.12"
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"] }
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread"] }
+clap = { version = "4", features = ["derive"] }
+rpassword = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
