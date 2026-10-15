@@ -12,6 +12,8 @@ iloader-export you@example.com -o <path>    # custom .p12 output path
 
 ## Notes
 
+Release binaries are unsigned, so macOS quarantines the download and may refuse to run it. Clear that with `xattr -d com.apple.quarantine ./iloader-export`.
+
 Login goes through an anisette server, by default the third-party `https://ani.jkcoxson.com` (override with `--anisette-server`). 
 
 Use `--inspect` to look at iLoader's storage without any network access.
