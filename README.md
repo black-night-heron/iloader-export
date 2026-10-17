@@ -24,6 +24,13 @@ Login goes through an anisette server, by default the third-party `https://ani.j
 cargo build --release
 ```
 
+## Acknowledgments
+
+Thanks to both of these projects for making this possible:
+
+- [isideload](https://github.com/nab138/isideload) — Rust sideloading crate used for Apple-session and certificate handling.
+- [iloader](https://github.com/nab138/iloader) — iOS sideloading tool.
+
 ## License
 
 MIT.
