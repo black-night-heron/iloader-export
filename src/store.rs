@@ -35,6 +35,23 @@ pub fn private_key_entry(apple_id: &str) -> String {
     )
 }
 
+pub enum Requested {
+    Auto,
+    Keyring,
+    Fs(PathBuf),
+}
+
+impl Requested {
+    /// iLoader's own preference order; an unresolvable path stays in the list as an error to report.
+    pub fn candidates(&self) -> Vec<Result<Backend, Report>> {
+        match self {
+            Requested::Keyring => vec![Ok(Backend::Keyring)],
+            Requested::Fs(dir) => vec![Ok(Backend::Fs(dir.clone()))],
+            Requested::Auto => vec![Ok(Backend::Keyring), default_fs_dir().map(Backend::Fs)],
+        }
+    }
+}
+
 /// Tauri's `app_data_dir` for iLoader, which is where its filesystem fallback storage lives.
 pub fn default_fs_dir() -> Result<PathBuf, Report> {
     #[cfg(target_os = "windows")]
@@ -69,9 +86,8 @@ pub fn open(backend: &Backend) -> Box<dyn SideloadingStorage> {
     }
 }
 
-/// Reads go to iLoader's storage; every write is dropped, so this tool cannot create,
-/// replace or delete an entry. The anisette state the login flow insists on persisting
-/// is simply not persisted.
+/// Every write is dropped, so this tool cannot create, replace or delete an entry — including the
+/// anisette state the login flow insists on persisting.
 pub struct ReadOnly {
     inner: Box<dyn SideloadingStorage>,
 }
@@ -107,17 +123,50 @@ pub fn read_only_storage(backend: &Backend) -> Box<dyn SideloadingStorage> {
     })
 }
 
-/// Read-only: unlike `CertificateIdentity::retrieve_private_key`, this never generates a key.
-pub fn load_private_key(apple_id: &str, backend: &Backend) -> Result<RsaPrivateKey, Report> {
+/// Skipped locations are printed so a broken credential store cannot silently drop the export onto
+/// iLoader's unencrypted filesystem copy. Unlike `CertificateIdentity::retrieve_private_key`, this
+/// never generates a key.
+pub fn find_private_key(
+    apple_id: &str,
+    candidates: &[Result<Backend, Report>],
+) -> Result<(Backend, RsaPrivateKey), Report> {
     let entry = private_key_entry(apple_id);
-    let der = open(backend).retrieve_data(&entry)?.ok_or_else(|| {
-        report!(
-            "No private key found in {}. Expected an entry named \"{entry}\" for {}",
-            backend.describe(),
-            apple_id
-        )
-    })?;
-    Ok(RsaPrivateKey::from_pkcs8_der(&der).context("Stored private key is not PKCS#8 DER")?)
+    let mut skipped: Vec<String> = Vec::new();
+
+    for candidate in candidates {
+        let backend = match candidate {
+            Ok(backend) => backend.clone(),
+            Err(error) => {
+                skipped.push(error.to_string());
+                continue;
+            }
+        };
+
+        match open(&backend).retrieve_data(&entry) {
+            Ok(Some(der)) => match RsaPrivateKey::from_pkcs8_der(&der) {
+                Ok(private_key) => {
+                    for note in &skipped {
+                        println!("skipped: {note}");
+                    }
+                    return Ok((backend, private_key));
+                }
+                Err(error) => skipped.push(format!(
+                    "{}: the stored key is not PKCS#8 DER: {error}",
+                    backend.describe()
+                )),
+            },
+            Ok(None) => skipped.push(format!("{}: no private key", backend.describe())),
+            Err(error) => skipped.push(format!("{}: {error}", backend.describe())),
+        }
+    }
+
+    bail!(
+        "No private key for {apple_id}, expected an entry named \"{entry}\". Tried:\n  {}\n\
+         Nothing was written to these locations. Check that the Apple ID is spelled exactly as \
+         iLoader saved it, and pass --storage-dir if its data is not in the default app data \
+         directory.",
+        skipped.join("\n  ")
+    )
 }
 
 pub fn load_password(apple_id: &str) -> Option<String> {
@@ -138,41 +187,48 @@ pub fn fingerprint(key: &RsaPrivateKey) -> Result<String, Report> {
     Ok(digest.chars().take(16).collect::<String>())
 }
 
-pub fn inspect(apple_id: &str, backend: &Backend) {
+pub fn inspect(apple_id: &str, candidates: &[Result<Backend, Report>]) {
     let entry = private_key_entry(apple_id);
-    let status = match open(backend).retrieve_data(&entry) {
-        Ok(Some(der)) => match RsaPrivateKey::from_pkcs8_der(&der) {
-            Ok(key) => format!(
-                "present ({} bytes, sha256:{})",
-                der.len(),
-                fingerprint(&key).unwrap_or_default()
-            ),
-            Err(e) => format!("present but unreadable: {e}"),
-        },
-        Ok(None) => format!("absent (expected entry \"{entry}\")"),
-        Err(e) => format!("unreadable: {e}"),
-    };
-    println!("private key: {status}");
+    println!("private key entry: {entry}");
 
-    let anisette = open(backend).retrieve_data(isideload::anisette::remote_v3::ANISETTE_STATE_KEY);
+    for candidate in candidates {
+        match candidate {
+            Err(error) => println!("filesystem fallback: {error}"),
+            Ok(backend) => {
+                let storage = open(backend);
+                let key = match storage.retrieve_data(&entry) {
+                    Ok(Some(der)) => match RsaPrivateKey::from_pkcs8_der(&der) {
+                        Ok(key) => format!(
+                            "present ({} bytes, sha256:{})",
+                            der.len(),
+                            fingerprint(&key).unwrap_or_default()
+                        ),
+                        Err(error) => format!("present but unreadable: {error}"),
+                    },
+                    Ok(None) => "absent".to_string(),
+                    Err(error) => format!("unreadable: {error}"),
+                };
+                println!("{}: private key {key}", backend.describe());
+
+                let anisette = match storage
+                    .retrieve_data(isideload::anisette::remote_v3::ANISETTE_STATE_KEY)
+                {
+                    Ok(Some(_)) => "present".to_string(),
+                    Ok(None) => "absent".to_string(),
+                    Err(error) => format!("unreadable: {error}"),
+                };
+                println!("{}: anisette state {anisette}", backend.describe());
+            }
+        }
+    }
+
+    // iLoader writes the password straight to the credential store, never through a backend.
     println!(
-        "anisette state: {}",
-        match anisette {
-            Ok(Some(_)) => "present".to_string(),
-            Ok(None) => "absent".to_string(),
-            Err(e) => format!("unreadable: {e}"),
+        "keyring password: {}",
+        if load_password(apple_id).is_some() {
+            "present"
+        } else {
+            "absent"
         }
     );
-
-    match backend {
-        Backend::Keyring => println!(
-            "saved password: {}",
-            if load_password(apple_id).is_some() {
-                "present"
-            } else {
-                "absent"
-            }
-        ),
-        Backend::Fs(_) => println!("saved password: iLoader never stores it on the filesystem"),
-    }
 }

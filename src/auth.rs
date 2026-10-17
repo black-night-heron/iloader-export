@@ -12,9 +12,8 @@ use crate::store;
 
 pub const DEFAULT_ANISETTE_HOST: &str = "https://ani.jkcoxson.com";
 
-/// There is deliberately no password flag: command-line arguments are visible to every process on
-/// the machine and end up in shell history. Tries `$ILOADER_PASSWORD`, then the credential iLoader
-/// saved, then an interactive prompt that does not echo.
+/// There is deliberately no Apple ID password flag: arguments reach every process on the machine
+/// and end up in shell history.
 pub fn resolve_password(apple_id: &str) -> Result<String, Report> {
     if let Some(password) = std::env::var("ILOADER_PASSWORD")
         .ok()
@@ -28,6 +27,40 @@ pub fn resolve_password(apple_id: &str) -> Result<String, Report> {
         return Ok(password);
     }
     Ok(rpassword::prompt_password_stderr("Apple ID password: ")?)
+}
+
+pub fn require_non_empty(password: &str, source: &str) -> Result<String, Report> {
+    if password.is_empty() {
+        bail!("{source} was empty; an empty import password leaves the private key unprotected");
+    }
+    Ok(password.to_string())
+}
+
+/// The bool is true only for the machine ID: SideStore and AltStore expect it, and it is the one
+/// source here the user has not already seen.
+pub fn resolve_p12_password(
+    flag: Option<&str>,
+    machine_id: &str,
+) -> Result<(String, bool), Report> {
+    if let Some(password) = flag {
+        tracing::warn!("--p12-password is visible to other processes and in shell history");
+        return Ok((password.to_string(), false));
+    }
+    if let Some(password) = std::env::var("ILOADER_P12_PASSWORD")
+        .ok()
+        .filter(|password| !password.is_empty())
+    {
+        tracing::info!("Using the import password from $ILOADER_P12_PASSWORD");
+        return Ok((password, false));
+    }
+    if !machine_id.is_empty() {
+        return Ok((machine_id.to_string(), true));
+    }
+    let password = rpassword::prompt_password_stderr("PKCS#12 import password: ")?;
+    Ok((
+        require_non_empty(&password, "the password you entered")?,
+        false,
+    ))
 }
 
 fn normalize_anisette_url(server: &str) -> String {

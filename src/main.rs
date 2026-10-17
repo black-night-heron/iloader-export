@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 #[derive(Clone, ValueEnum)]
 enum BackendArg {
+    /// Look in iLoader's system credential store first, then its app data directory
+    Auto,
     /// iLoader's system credential store (Keychain, Credential Manager or Secret Service)
     Keyring,
     /// Plain files in iLoader's app data directory
@@ -26,7 +28,8 @@ struct Cli {
     #[arg(short, long, default_value = "iloader.p12")]
     out: PathBuf,
 
-    /// Defaults to the certificate's machine ID, which is what SideStore and AltStore expect
+    /// Defaults to the certificate's machine ID, which is what SideStore and AltStore expect.
+    /// Prefer $ILOADER_P12_PASSWORD: a flag value is visible to other processes and in shell history
     #[arg(long)]
     p12_password: Option<String>,
 
@@ -34,7 +37,7 @@ struct Cli {
     #[arg(long)]
     team: Option<String>,
 
-    #[arg(long, value_enum, default_value_t = BackendArg::Keyring)]
+    #[arg(long, value_enum, default_value_t = BackendArg::Auto)]
     backend: BackendArg,
 
     /// Implies --backend fs; defaults to iLoader's app data directory for this platform
@@ -84,19 +87,22 @@ async fn main() {
 }
 
 async fn run(cli: &Cli) -> Result<(), Report> {
-    let backend = match (&cli.backend, cli.storage_dir.clone()) {
-        (BackendArg::Fs, Some(dir)) | (BackendArg::Keyring, Some(dir)) => store::Backend::Fs(dir),
-        (BackendArg::Fs, None) => store::Backend::Fs(store::default_fs_dir()?),
-        (BackendArg::Keyring, None) => store::Backend::Keyring,
+    // An explicit --storage-dir names the location, so it wins over --backend.
+    let requested = match (&cli.backend, cli.storage_dir.clone()) {
+        (_, Some(dir)) => store::Requested::Fs(dir),
+        (BackendArg::Auto, None) => store::Requested::Auto,
+        (BackendArg::Keyring, None) => store::Requested::Keyring,
+        (BackendArg::Fs, None) => store::Requested::Fs(store::default_fs_dir()?),
     };
-    println!("Reading iLoader data from {}", backend.describe());
+    let candidates = requested.candidates();
 
     if cli.inspect {
-        store::inspect(&cli.apple_id, &backend);
+        store::inspect(&cli.apple_id, &candidates);
         return Ok(());
     }
 
-    let private_key = store::load_private_key(&cli.apple_id, &backend)?;
+    let (backend, private_key) = store::find_private_key(&cli.apple_id, &candidates)?;
+    println!("Reading iLoader data from {}", backend.describe());
     println!(
         "Stored private key: sha256:{}",
         store::fingerprint(&private_key)?
@@ -108,6 +114,13 @@ async fn run(cli: &Cli) -> Result<(), Report> {
             cli.out.display()
         );
     }
+
+    // Reject an empty archive password before spending a login on it.
+    let p12_password_flag = cli
+        .p12_password
+        .as_deref()
+        .map(|password| auth::require_non_empty(password, "--p12-password"))
+        .transpose()?;
 
     let password = auth::resolve_password(&cli.apple_id)?;
     let mut session = auth::login(
@@ -123,13 +136,14 @@ async fn run(cli: &Cli) -> Result<(), Report> {
         export::find_existing_identity(&mut session, &private_key, cli.team.as_deref()).await?;
     export::summarize(&found);
 
-    let p12_password = match &cli.p12_password {
-        Some(password) => password.clone(),
-        None if found.identity.machine_id.is_empty() => {
-            bail!("The certificate has no machine ID; pass --p12-password")
-        }
-        None => found.identity.machine_id.clone(),
-    };
+    let (p12_password, is_machine_id) =
+        auth::resolve_p12_password(p12_password_flag.as_deref(), &found.identity.machine_id)?;
 
-    export::write_p12(&found, &p12_password, &cli.out).await
+    export::write_p12(&found, &p12_password, &cli.out).await?;
+
+    // A password the user supplied is one they already know.
+    if is_machine_id {
+        println!("Password for importing: {p12_password}");
+    }
+    Ok(())
 }

@@ -1,6 +1,6 @@
 [package]
 name = "iloader-export"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Export the Apple Development certificate and private key that iLoader already uses, packaged as a PKCS#12 archive, without creating or revoking anything"
